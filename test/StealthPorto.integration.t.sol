@@ -23,14 +23,6 @@ import {ERC7821} from "lib/account/lib/solady/src/accounts/ERC7821.sol";
 abstract contract StealthPortoIntegrationBase is Test {
   using ECDSA for bytes32;
 
-  // Struct to hold EIP-7702 delegation signature components
-  struct DelegationSignature {
-    uint8 v;
-    bytes32 r;
-    bytes32 s;
-    uint64 nonce;
-    address authority;
-  }
 
   // Core contracts
   StealthSender public stealthSender;
@@ -59,7 +51,7 @@ abstract contract StealthPortoIntegrationBase is Test {
   address public stealthAddress;
 
   // EIP-7702 delegation signature
-  DelegationSignature public delegationSig;
+  Vm.SignedDelegation public delegationSig;
 
   // Test amounts - will be set by fuzz inputs
   uint256 public constant INITIAL_BALANCE = 1000 ether;
@@ -274,26 +266,24 @@ abstract contract StealthPortoIntegrationBase is Test {
     assertEq(token.balanceOf(stealthAddr), amount);
   }
 
-  /// @notice Step 4: Set up EIP-7702 delegation
+  /// @notice Step 4: Deploy IthacaAccount implementation (delegation will be attached to transaction)
   /// @param orchestrator The orchestrator address (or address(0) if none)
   /// @param stealthAddr The stealth address that will delegate
+  /// @param stealthPrivKey The private key of the stealth address
   function _setupEIP7702Delegation(
     address orchestrator,
     address stealthAddr,
-    uint256 // stealthPrivKey - not used with vm.etch approach
+    uint256 stealthPrivKey
   ) internal returns (IthacaAccount) {
     // Deploy a new IthacaAccount configured with the orchestrator (if provided)
     IthacaAccount implementation = new IthacaAccount(orchestrator);
 
-    // Use vm.etch with EIP-7702 delegation prefix to make the EOA delegate to the account
-    // The prefix 0xef0100 indicates EIP-7702 delegation
-    vm.etch(stealthAddr, abi.encodePacked(hex"ef0100", address(implementation)));
+    // Store the delegation signature for later use when submitting the Intent
+    // We'll attach it to the first transaction instead of etching
+    delegationSig = vm.signDelegation(address(implementation), stealthPrivKey);
 
-    // Update our reference - the stealth address now behaves as an IthacaAccount
+    // Update our reference - the stealth address will behave as an IthacaAccount after delegation
     sweepAccount = IthacaAccount(payable(stealthAddr));
-
-    // No need to add keys when using vm.etch with EIP-7702 prefix
-    // The EOA can sign directly and the account will validate it without key registration
 
     return implementation;
   }
@@ -396,6 +386,9 @@ contract StealthPortoIntegration_Basic is StealthPortoIntegrationBase {
 
   /// @notice Execute sweep to shielded pool without orchestrator
   function _executeSweepToShieldedPool() internal override returns (bytes32) {
+    // Attach the EIP-7702 delegation to the first transaction
+    vm.attachDelegation(delegationSig);
+
     // First approve shielded pool to spend tokens
     vm.prank(stealthAddress);
     token.approve(address(shieldedPool), stealthAmount);
@@ -428,6 +421,7 @@ contract StealthPortoIntegration_WithOrchestrator is StealthPortoIntegrationBase
   address public sponsor; // Will sponsor gas through orchestrator  
   IthacaAccount public sponsorAccount; // Sponsor's IthacaAccount
   uint256 public sponsorAmount; // Amount sponsor will pay for gas
+  Vm.SignedDelegation public sponsorDelegationSig; // Sponsor's delegation signature
 
   function setUp() public override {
     super.setUp();
@@ -474,7 +468,8 @@ contract StealthPortoIntegration_WithOrchestrator is StealthPortoIntegrationBase
     
     // Set up sponsor as an IthacaAccount with EIP-7702 delegation
     sponsorAccount = new IthacaAccount(address(orchestrator));
-    vm.etch(sponsor, abi.encodePacked(hex"ef0100", address(sponsorAccount)));
+    // Store sponsor's delegation for later
+    sponsorDelegationSig = vm.signDelegation(address(sponsorAccount), sponsorPrivateKey);
 
     // Fund sponsor with tokens (they will pay for gas)
     token.mint(sponsor, INITIAL_BALANCE);
@@ -601,9 +596,15 @@ contract StealthPortoIntegration_WithOrchestrator is StealthPortoIntegrationBase
     vm.expectEmit();
     emit Deposit(commitment, address(token), stealthAmount, encryptedNote);
 
+    // Attach both EIP-7702 delegations to the transaction
+    // First the stealth address delegation
+    vm.attachDelegation(delegationSig);
+    // Then the sponsor's delegation
+    vm.attachDelegation(sponsorDelegationSig);
+
     // Submit the Intent to the orchestrator
     // The orchestrator will:
-    // 1. Verify the signature against the stealth address's authorized key
+    // 1. Verify the signature against the stealth address (no key registration needed)
     // 2. Execute the calls on the stealth address
     // 3. Transfer payment from sponsor to relayer atomically
     vm.prank(relayer); // Relayer submits the Intent
