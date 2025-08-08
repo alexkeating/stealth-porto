@@ -1,3 +1,12 @@
 [submodule "lib/forge-std"]
 	path = lib/forge-std
 	url = https://github.com/foundry-rs/forge-std
+[submodule "lib/stealth-address-erc-contracts"]
+	path = lib/stealth-address-erc-contracts
+	url = https://github.com/ScopeLift/stealth-address-erc-contracts
+[submodule "lib/openzeppelin-contracts"]
+	path = lib/openzeppelin-contracts
+	url = https://github.com/OpenZeppelin/openzeppelin-contracts
+[submodule "lib/account"]
+	path = lib/account
+	url = https://github.com/ithacaxyz/account
