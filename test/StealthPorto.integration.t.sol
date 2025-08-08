@@ -274,74 +274,26 @@ abstract contract StealthPortoIntegrationBase is Test {
     assertEq(token.balanceOf(stealthAddr), amount);
   }
 
-  // Store the keyHash from authorization for signature validation
-  bytes32 public authorizedKeyHash;
-
   /// @notice Step 4: Set up EIP-7702 delegation
   /// @param orchestrator The orchestrator address (or address(0) if none)
   /// @param stealthAddr The stealth address that will delegate
-  /// @param stealthPrivKey The private key of the stealth address
   function _setupEIP7702Delegation(
     address orchestrator,
     address stealthAddr,
-    uint256 stealthPrivKey
+    uint256 // stealthPrivKey - not used with vm.etch approach
   ) internal returns (IthacaAccount) {
     // Deploy a new IthacaAccount configured with the orchestrator (if provided)
     IthacaAccount implementation = new IthacaAccount(orchestrator);
 
-    // Sign the EIP-7702 delegation from the stealth address to the IthacaAccount
-    // This creates the delegation signature that would be included in a real transaction
-    Vm.SignedDelegation memory signedDelegation =
-      vm.signDelegation(address(implementation), stealthPrivKey);
-
-    // Store the delegation signature for reference
-    delegationSig = DelegationSignature({
-      v: signedDelegation.v,
-      r: signedDelegation.r,
-      s: signedDelegation.s,
-      nonce: signedDelegation.nonce,
-      authority: signedDelegation.implementation
-    });
-
-    // Attach the delegation to the next transaction from the stealth address
-    // This simulates including the EIP-7702 delegation in a transaction
-    // The delegation will be active when the stealth address makes its next transaction
-    vm.attachDelegation(signedDelegation);
+    // Use vm.etch with EIP-7702 delegation prefix to make the EOA delegate to the account
+    // The prefix 0xef0100 indicates EIP-7702 delegation
+    vm.etch(stealthAddr, abi.encodePacked(hex"ef0100", address(implementation)));
 
     // Update our reference - the stealth address now behaves as an IthacaAccount
     sweepAccount = IthacaAccount(payable(stealthAddr));
 
-    // For orchestrator integration, we need to add a key for signature validation
-    // This allows the account to validate ECDSA signatures from the stealth private key
-    if (orchestrator != address(0)) {
-      // Derive the public key from the private key for Secp256k1
-      address publicKeyAddr = vm.addr(stealthPrivKey);
-      
-      // Create a Secp256k1 key for signature validation
-      IthacaAccount.Key memory eoaKey = IthacaAccount.Key({
-        expiry: 0, // Never expires
-        keyType: IthacaAccount.KeyType.Secp256k1,
-        isSuperAdmin: true,
-        publicKey: abi.encodePacked(publicKeyAddr)
-      });
-      
-      // Add the key through the account's authorize function
-      // Since authorize is onlyThis, we need to call it through execute
-      ERC7821.Call[] memory calls = new ERC7821.Call[](1);
-      calls[0] = ERC7821.Call({
-        to: stealthAddr,
-        value: 0,
-        data: abi.encodeWithSelector(sweepAccount.authorize.selector, eoaKey)
-      });
-      
-      bytes32 mode = bytes32(uint256(0x0100000000000000000000000000000000000000000000000000000000000000));
-      vm.prank(stealthAddr);
-      sweepAccount.execute(mode, abi.encode(calls));
-      
-      // Calculate the keyHash the same way the contract does
-      // keyHash = keccak256(abi.encode(key.keyType, keccak256(key.publicKey)))
-      authorizedKeyHash = keccak256(abi.encode(uint8(IthacaAccount.KeyType.Secp256k1), uint256(keccak256(abi.encodePacked(publicKeyAddr)))));
-    }
+    // No need to add keys when using vm.etch with EIP-7702 prefix
+    // The EOA can sign directly and the account will validate it without key registration
 
     return implementation;
   }
@@ -473,7 +425,8 @@ contract StealthPortoIntegration_WithOrchestrator is StealthPortoIntegrationBase
   MockOrchestrator public orchestrator;
 
   uint256 public sponsorPrivateKey;
-  address public sponsor; // Will sponsor gas through orchestrator
+  address public sponsor; // Will sponsor gas through orchestrator  
+  IthacaAccount public sponsorAccount; // Sponsor's IthacaAccount
   uint256 public sponsorAmount; // Amount sponsor will pay for gas
 
   function setUp() public override {
@@ -518,14 +471,17 @@ contract StealthPortoIntegration_WithOrchestrator is StealthPortoIntegrationBase
     
     // Relayer fee is already properly bounded in _setupFuzzTest (max 5% of stealthAmount)
     // No need to recalculate since sponsor payment is separate
+    
+    // Set up sponsor as an IthacaAccount with EIP-7702 delegation
+    sponsorAccount = new IthacaAccount(address(orchestrator));
+    vm.etch(sponsor, abi.encodePacked(hex"ef0100", address(sponsorAccount)));
 
-    // Fund sponsor
+    // Fund sponsor with tokens (they will pay for gas)
     token.mint(sponsor, INITIAL_BALANCE);
     vm.deal(sponsor, INITIAL_BALANCE);
 
-    // Sponsor approves orchestrator for payment
-    vm.prank(sponsor);
-    token.approve(address(orchestrator), type(uint256).max);
+    // The sponsor doesn't need to approve the orchestrator, but needs to sign the payment
+    // The payment signature will be added to the Intent
 
     // Step 1: Recipient registers stealth meta address
     bytes memory metaAddress =
@@ -625,14 +581,18 @@ contract StealthPortoIntegration_WithOrchestrator is StealthPortoIntegrationBase
       supportedAccountImplementation: address(0) // Allow any implementation
     });
 
-    // Sign the Intent with the stealth address's key
-    // The signature needs to be from the authorized key we added
+    // Sign the Intent with the stealth address's private key
+    // With vm.etch delegation, the EOA can sign directly without key registration
     bytes32 intentHash = orchestrator.computeDigest(intent);
     (uint8 v, bytes32 r, bytes32 s) = vm.sign(stealthPrivateKey, intentHash);
     
-    // Pack the signature with the authorized keyHash
-    // Format: innerSignature || keyHash || prehash
-    intent.signature = abi.encodePacked(abi.encodePacked(r, s, v), authorizedKeyHash, "");
+    // Use raw ECDSA signature (not wrapped) for direct EOA validation
+    // This will be handled by the 64-65 byte signature path in unwrapAndValidateSignature
+    intent.signature = abi.encodePacked(r, s, v);
+    
+    // Sign the payment with the sponsor's private key
+    (uint8 payV, bytes32 payR, bytes32 payS) = vm.sign(sponsorPrivateKey, intentHash);
+    intent.paymentSignature = abi.encodePacked(payR, payS, payV);
 
     // Encode the Intent for submission
     bytes memory encodedIntent = abi.encode(intent);
