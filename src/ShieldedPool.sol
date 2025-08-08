@@ -3,11 +3,13 @@ pragma solidity 0.8.30;
 
 import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
-import {ReentrancyGuardTransient} from "openzeppelin-contracts/contracts/utils/ReentrancyGuardTransient.sol";
+import {ReentrancyGuardTransient} from
+  "openzeppelin-contracts/contracts/utils/ReentrancyGuardTransient.sol";
 import {ECDSA} from "openzeppelin-contracts/contracts/utils/cryptography/ECDSA.sol";
 
 /// @title ShieldedPool
-/// @notice A mock shielded pool that allows users to deposit and withdraw funds with basic privacy features
+/// @notice A mock shielded pool that allows users to deposit and withdraw funds with basic privacy
+/// features
 /// @dev This is a simplified implementation for demonstration purposes
 contract ShieldedPool is ReentrancyGuardTransient {
   using SafeERC20 for IERC20;
@@ -36,15 +38,13 @@ contract ShieldedPool is ReentrancyGuardTransient {
   /// @notice Pool balances per token
   mapping(address => uint256) public poolBalances;
 
-  /// @notice Merkle tree root for commitments (simplified - in production would use actual Merkle tree)
+  /// @notice Merkle tree root for commitments (simplified - in production would use actual Merkle
+  /// tree)
   bytes32 public merkleRoot;
 
   /// @notice Events
   event Deposit(
-    bytes32 indexed commitment,
-    address indexed token,
-    uint256 amount,
-    bytes32 encryptedNote
+    bytes32 indexed commitment, address indexed token, uint256 amount, bytes32 encryptedNote
   );
 
   event Withdrawal(
@@ -81,12 +81,11 @@ contract ShieldedPool is ReentrancyGuardTransient {
   /// @param amount The amount to deposit
   /// @param commitment The commitment hash (poseidon hash of secret and nullifier)
   /// @param encryptedNote Encrypted note containing the secret information
-  function deposit(
-    address token,
-    uint256 amount,
-    bytes32 commitment,
-    bytes32 encryptedNote
-  ) external payable nonReentrant {
+  function deposit(address token, uint256 amount, bytes32 commitment, bytes32 encryptedNote)
+    external
+    payable
+    nonReentrant
+  {
     if (amount < MIN_DEPOSIT || amount > MAX_DEPOSIT) revert InvalidAmount();
     if (commitment == bytes32(0)) revert InvalidCommitment();
     if (commitments[commitment].noteCommitment != bytes32(0)) revert InvalidCommitment();
@@ -138,10 +137,7 @@ contract ShieldedPool is ReentrancyGuardTransient {
 
     if (poolBalances[token] < amount) revert InsufficientPoolBalance();
 
-    nullifiers[nullifier] = Nullifier({
-      nullifierHash: nullifier,
-      spent: true
-    });
+    nullifiers[nullifier] = Nullifier({nullifierHash: nullifier, spent: true});
 
     poolBalances[token] -= amount;
 
@@ -167,15 +163,9 @@ contract ShieldedPool is ReentrancyGuardTransient {
     bytes calldata proof
   ) internal view {
     if (proof.length < 32) revert InvalidProof();
-    
-    bytes32 proofHash = keccak256(abi.encodePacked(
-      token,
-      amount,
-      nullifier,
-      recipient,
-      merkleRoot
-    ));
-    
+
+    bytes32 proofHash = keccak256(abi.encodePacked(token, amount, nullifier, recipient, merkleRoot));
+
     bytes32 providedHash = abi.decode(proof, (bytes32));
     if (proofHash != providedHash) revert InvalidProof();
   }
@@ -188,7 +178,7 @@ contract ShieldedPool is ReentrancyGuardTransient {
   /// @notice Internal transfer helper
   function _transfer(address token, address to, uint256 amount) internal {
     if (token == address(0)) {
-      (bool success, ) = to.call{value: amount}("");
+      (bool success,) = to.call{value: amount}("");
       if (!success) revert TransferFailed();
     } else {
       IERC20(token).safeTransfer(to, amount);
@@ -219,19 +209,12 @@ contract ShieldedPool is ReentrancyGuardTransient {
 
   /// @notice Generate a mock proof for testing (not secure - only for demo)
   /// @dev In production, this would be generated client-side using zkSNARK circuits
-  function generateMockProof(
-    address token,
-    uint256 amount,
-    bytes32 nullifier,
-    address recipient
-  ) external view returns (bytes memory) {
-    bytes32 proofHash = keccak256(abi.encodePacked(
-      token,
-      amount,
-      nullifier,
-      recipient,
-      merkleRoot
-    ));
+  function generateMockProof(address token, uint256 amount, bytes32 nullifier, address recipient)
+    external
+    view
+    returns (bytes memory)
+  {
+    bytes32 proofHash = keccak256(abi.encodePacked(token, amount, nullifier, recipient, merkleRoot));
     return abi.encode(proofHash);
   }
 

@@ -21,10 +21,7 @@ contract ShieldedPoolTest is Test {
   bytes32 public encryptedNote = keccak256("encrypted_note");
 
   event Deposit(
-    bytes32 indexed commitment,
-    address indexed token,
-    uint256 amount,
-    bytes32 encryptedNote
+    bytes32 indexed commitment, address indexed token, uint256 amount, bytes32 encryptedNote
   );
 
   event Withdrawal(
@@ -52,7 +49,7 @@ contract ShieldedPoolTest_Deposit is ShieldedPoolTest {
   function test_DepositETH() public {
     uint256 aliceBalanceBefore = alice.balance;
 
-    vm.expectEmit(true, true, false, true);
+    vm.expectEmit();
     emit Deposit(commitment, address(0), DEPOSIT_AMOUNT, encryptedNote);
 
     vm.prank(alice);
@@ -60,8 +57,9 @@ contract ShieldedPoolTest_Deposit is ShieldedPoolTest {
 
     assertEq(alice.balance, aliceBalanceBefore - DEPOSIT_AMOUNT);
     assertEq(pool.getPoolBalance(address(0)), DEPOSIT_AMOUNT);
-    
-    (bytes32 noteCommitment, uint256 amount, address tokenAddr, uint256 timestamp) = pool.commitments(commitment);
+
+    (bytes32 noteCommitment, uint256 amount, address tokenAddr, uint256 timestamp) =
+      pool.commitments(commitment);
     assertEq(noteCommitment, commitment);
     assertEq(amount, DEPOSIT_AMOUNT);
     assertEq(tokenAddr, address(0));
@@ -71,7 +69,7 @@ contract ShieldedPoolTest_Deposit is ShieldedPoolTest {
   function test_DepositERC20() public {
     uint256 aliceBalanceBefore = token.balanceOf(alice);
 
-    vm.expectEmit(true, true, false, true);
+    vm.expectEmit();
     emit Deposit(commitment, address(token), DEPOSIT_AMOUNT, encryptedNote);
 
     vm.prank(alice);
@@ -91,7 +89,7 @@ contract ShieldedPoolTest_Deposit is ShieldedPoolTest {
   function test_RevertWhen_DepositAmountTooLarge() public {
     // Give alice enough balance for the large deposit
     vm.deal(alice, 200 ether);
-    
+
     vm.expectRevert(ShieldedPool.InvalidAmount.selector);
     vm.prank(alice);
     pool.deposit{value: 101 ether}(address(0), 101 ether, commitment, encryptedNote);
@@ -128,7 +126,7 @@ contract ShieldedPoolTest_Deposit is ShieldedPoolTest {
 contract ShieldedPoolTest_Withdraw is ShieldedPoolTest {
   function setUp() public override {
     super.setUp();
-    
+
     vm.prank(alice);
     pool.deposit{value: DEPOSIT_AMOUNT}(address(0), DEPOSIT_AMOUNT, commitment, encryptedNote);
   }
@@ -137,7 +135,7 @@ contract ShieldedPoolTest_Withdraw is ShieldedPoolTest {
     uint256 bobBalanceBefore = bob.balance;
     bytes memory proof = pool.generateMockProof(address(0), DEPOSIT_AMOUNT, nullifier, bob);
 
-    vm.expectEmit(true, true, true, true);
+    vm.expectEmit();
     emit Withdrawal(nullifier, address(0), bob, DEPOSIT_AMOUNT, 0);
 
     pool.withdraw(address(0), DEPOSIT_AMOUNT, nullifier, bob, address(0), 0, proof);
@@ -177,7 +175,7 @@ contract ShieldedPoolTest_Withdraw is ShieldedPoolTest {
 
   function test_RevertWhen_NullifierAlreadySpent() public {
     bytes memory proof = pool.generateMockProof(address(0), DEPOSIT_AMOUNT, nullifier, bob);
-    
+
     pool.withdraw(address(0), DEPOSIT_AMOUNT, nullifier, bob, address(0), 0, proof);
 
     vm.expectRevert(ShieldedPool.NullifierAlreadySpent.selector);
@@ -200,7 +198,7 @@ contract ShieldedPoolTest_Withdraw is ShieldedPoolTest {
 
   function test_RevertWhen_InsufficientPoolBalance() public {
     bytes memory proof = pool.generateMockProof(address(0), DEPOSIT_AMOUNT, nullifier, bob);
-    
+
     pool.withdraw(address(0), DEPOSIT_AMOUNT, nullifier, bob, address(0), 0, proof);
 
     bytes32 newNullifier = keccak256("new_nullifier");
@@ -223,7 +221,7 @@ contract ShieldedPoolTest_Relayer is ShieldedPoolTest {
   function test_RegisterRelayer() public {
     uint256 fee = 100;
 
-    vm.expectEmit(true, false, false, true);
+    vm.expectEmit();
     emit ShieldedPool.RelayerRegistered(relayer, fee);
 
     vm.prank(relayer);
@@ -255,7 +253,7 @@ contract ShieldedPoolTest_Fuzz is ShieldedPoolTest {
     pool.deposit{value: amount}(address(0), amount, commitmentFuzz, encryptedNote);
 
     bytes memory proof = pool.generateMockProof(address(0), amount, nullifierFuzz, recipient);
-    
+
     uint256 recipientBalanceBefore = recipient.balance;
     pool.withdraw(address(0), amount, nullifierFuzz, recipient, address(0), 0, proof);
 
