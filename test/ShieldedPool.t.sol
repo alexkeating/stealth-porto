@@ -248,6 +248,12 @@ contract ShieldedPoolTest_Fuzz is ShieldedPoolTest {
     vm.assume(commitmentFuzz != bytes32(0));
     vm.assume(nullifierFuzz != bytes32(0));
     vm.assume(recipient != address(0));
+    // Exclude precompile addresses (0x01 - 0x09) and common system addresses
+    vm.assume(recipient > address(0x09));
+    // Exclude the Create2Deployer and other known problematic addresses
+    vm.assume(recipient != address(0x4e59b44847b379578588920cA78FbF26c0B4956C));
+    // Ensure recipient is not a contract (to avoid issues with contracts that can't receive ETH)
+    vm.assume(recipient.code.length == 0);
 
     vm.prank(alice);
     pool.deposit{value: amount}(address(0), amount, commitmentFuzz, encryptedNote);
