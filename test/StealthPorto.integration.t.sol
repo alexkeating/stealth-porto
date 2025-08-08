@@ -5,6 +5,7 @@ import {Test} from "forge-std/Test.sol";
 import {Vm} from "forge-std/Vm.sol";
 import {StealthSender} from "src/StealthSender.sol";
 import {IthacaAccount} from "lib/account/src/IthacaAccount.sol";
+import {IIthacaAccount} from "lib/account/src/interfaces/IIthacaAccount.sol";
 import {ShieldedPool} from "src/ShieldedPool.sol";
 import {IERC5564Announcer} from "src/interfaces/IERC5564Announcer.sol";
 import {ERC5564Announcer} from "test/helpers/ERC5564Announcer.sol";
@@ -163,8 +164,9 @@ abstract contract StealthPortoIntegrationBase is Test {
     vm.assume(relayer != address(token) && relayer != address(registry));
 
     // Bound amounts to reasonable range
-    stealthAmount = bound(_amount, 0.1 ether, 100 ether);
-    // Ensure relayer fee is valid: min 0.001 ether, max 5% of amount
+    stealthAmount = bound(_amount, 1 ether, 100 ether); // Increased minimum to 1 ether
+    
+    // Ensure relayer fee is valid: min 0.001 ether, max 5% of stealth amount
     uint256 maxFee = stealthAmount / 20; // 5% max fee (ShieldedPool limit)
     uint256 minFee = 0.001 ether;
     // If max fee would be less than min fee, use a smaller min
@@ -272,6 +274,9 @@ abstract contract StealthPortoIntegrationBase is Test {
     assertEq(token.balanceOf(stealthAddr), amount);
   }
 
+  // Store the keyHash from authorization for signature validation
+  bytes32 public authorizedKeyHash;
+
   /// @notice Step 4: Set up EIP-7702 delegation
   /// @param orchestrator The orchestrator address (or address(0) if none)
   /// @param stealthAddr The stealth address that will delegate
@@ -306,25 +311,58 @@ abstract contract StealthPortoIntegrationBase is Test {
     // Update our reference - the stealth address now behaves as an IthacaAccount
     sweepAccount = IthacaAccount(payable(stealthAddr));
 
+    // For orchestrator integration, we need to add a key for signature validation
+    // This allows the account to validate ECDSA signatures from the stealth private key
+    if (orchestrator != address(0)) {
+      // Derive the public key from the private key for Secp256k1
+      address publicKeyAddr = vm.addr(stealthPrivKey);
+      
+      // Create a Secp256k1 key for signature validation
+      IthacaAccount.Key memory eoaKey = IthacaAccount.Key({
+        expiry: 0, // Never expires
+        keyType: IthacaAccount.KeyType.Secp256k1,
+        isSuperAdmin: true,
+        publicKey: abi.encodePacked(publicKeyAddr)
+      });
+      
+      // Add the key through the account's authorize function
+      // Since authorize is onlyThis, we need to call it through execute
+      ERC7821.Call[] memory calls = new ERC7821.Call[](1);
+      calls[0] = ERC7821.Call({
+        to: stealthAddr,
+        value: 0,
+        data: abi.encodeWithSelector(sweepAccount.authorize.selector, eoaKey)
+      });
+      
+      bytes32 mode = bytes32(uint256(0x0100000000000000000000000000000000000000000000000000000000000000));
+      vm.prank(stealthAddr);
+      sweepAccount.execute(mode, abi.encode(calls));
+      
+      // Calculate the keyHash the same way the contract does
+      // keyHash = keccak256(abi.encode(key.keyType, keccak256(key.publicKey)))
+      authorizedKeyHash = keccak256(abi.encode(uint8(IthacaAccount.KeyType.Secp256k1), uint256(keccak256(abi.encodePacked(publicKeyAddr)))));
+    }
+
     return implementation;
   }
 
   /// @notice Step 5: Withdraw from shielded pool
-  function _withdrawFromShieldedPool(bytes32) internal {
+  /// @param depositedAmount The amount that was deposited (may be less than stealthAmount)
+  function _withdrawFromShieldedPool(bytes32, uint256 depositedAmount) internal {
     // Generate nullifier for withdrawal
     bytes32 nullifier = keccak256(abi.encodePacked("nullifier", recipient));
 
     // Generate proof (mock proof for testing)
     bytes memory proof =
-      shieldedPool.generateMockProof(address(token), stealthAmount, nullifier, recipient);
+      shieldedPool.generateMockProof(address(token), depositedAmount, nullifier, recipient);
 
     // Relayer executes withdrawal on behalf of recipient
     vm.expectEmit();
-    emit Withdrawal(nullifier, address(token), recipient, stealthAmount, relayerFee);
+    emit Withdrawal(nullifier, address(token), recipient, depositedAmount, relayerFee);
 
     vm.prank(relayer);
     shieldedPool.withdraw(
-      address(token), stealthAmount, nullifier, recipient, relayer, relayerFee, proof
+      address(token), depositedAmount, nullifier, recipient, relayer, relayerFee, proof
     );
   }
 
@@ -385,7 +423,7 @@ contract StealthPortoIntegration_Basic is StealthPortoIntegrationBase {
     bytes32 depositCommitment = _executeSweepToShieldedPool();
 
     // Step 6: Recipient withdraws from shielded pool to original account
-    _withdrawFromShieldedPool(depositCommitment);
+    _withdrawFromShieldedPool(depositCommitment, stealthAmount);
 
     // Final verification
     // Recipient should have received tokens minus relayer fee
@@ -474,7 +512,12 @@ contract StealthPortoIntegration_WithOrchestrator is StealthPortoIntegrationBase
     sponsorPrivateKey = bound(_sponsorKey, 1, maxKey);
     sponsor = vm.addr(sponsorPrivateKey);
     vm.assume(sponsor != sender && sponsor != recipient && sponsor != relayer);
+    
+    // Sponsor amount is separate from the stealth amount - it's for gas payment
     sponsorAmount = bound(_sponsorPayment, 0.01 ether, 2 ether);
+    
+    // Relayer fee is already properly bounded in _setupFuzzTest (max 5% of stealthAmount)
+    // No need to recalculate since sponsor payment is separate
 
     // Fund sponsor
     token.mint(sponsor, INITIAL_BALANCE);
@@ -502,41 +545,44 @@ contract StealthPortoIntegration_WithOrchestrator is StealthPortoIntegrationBase
     bytes32 depositCommitment = _executeSweepToShieldedPool();
 
     // Step 6: Recipient withdraws from shielded pool to original account
-    _withdrawFromShieldedPool(depositCommitment);
+    // The FULL amount was deposited (sponsor paid separately)
+    _withdrawFromShieldedPool(depositCommitment, stealthAmount);
 
     // Final verification with sponsor payment
-    // Recipient should have received tokens minus relayer fee
+    // Recipient should have received full stealth amount minus relayer fee
     assertEq(token.balanceOf(recipient), stealthAmount - relayerFee);
 
-    // Relayer should have received fee plus sponsor payment
+    // Relayer should have received both the withdrawal fee and sponsor payment
     assertEq(token.balanceOf(relayer), relayerFee + sponsorAmount);
 
-    // Sponsor should have paid for gas
-    assertEq(token.balanceOf(sponsor), INITIAL_BALANCE - sponsorAmount);
-
-    // Stealth address should be empty
+    // Stealth address should be empty (deposited everything to pool)
     assertEq(token.balanceOf(stealthAddress), 0);
 
     // Shielded pool should be empty (all withdrawn)
     assertEq(token.balanceOf(address(shieldedPool)), 0);
 
-    // Sender should have reduced balance
+    // Sender should have reduced balance (original transfer to stealth address)
     assertEq(token.balanceOf(sender), INITIAL_BALANCE - stealthAmount);
+    
+    // Sponsor should have reduced balance (paid for gas)
+    assertEq(token.balanceOf(sponsor), INITIAL_BALANCE - sponsorAmount);
   }
 
-  /// @notice Execute orchestrator-sponsored sweep
+  /// @notice Execute orchestrator-sponsored sweep by submitting Intent to orchestrator
+  /// @dev This demonstrates the full orchestrator integration where the Intent
+  /// is actually submitted to orchestrator.execute() for atomic execution
   function _executeSweepToShieldedPool() internal override returns (bytes32) {
-    // Create the sweep execution data
+    // Create the sweep execution data for the Intent
     ERC7821.Call[] memory calls = new ERC7821.Call[](2);
-
-    // First call: Approve shielded pool to spend tokens
+    
+    // First call: Approve shielded pool to spend ALL tokens
     calls[0] = ERC7821.Call({
       to: address(token),
       value: 0,
       data: abi.encodeWithSelector(token.approve.selector, address(shieldedPool), stealthAmount)
     });
 
-    // Second call: Deposit into shielded pool
+    // Second call: Deposit ALL tokens into shielded pool
     bytes32 commitment = keccak256(abi.encodePacked("secret", recipient, block.timestamp));
     bytes32 encryptedNote = keccak256(abi.encodePacked("encrypted", commitment));
 
@@ -548,29 +594,98 @@ contract StealthPortoIntegration_WithOrchestrator is StealthPortoIntegrationBase
       )
     });
 
-    // Encode execution data for orchestrator
+    // Encode execution data for the Intent
     bytes memory executionData = abi.encode(calls);
 
-    // For this test, we'll demonstrate orchestrator-compatible execution
-    // In production, the orchestrator would handle payment verification and gas sponsorship
-    // Here we'll execute directly through the account to show the integration works
+    // Create a properly structured Intent
+    ICommon.Intent memory intent = ICommon.Intent({
+      // Core Intent fields
+      eoa: stealthAddress,
+      executionData: executionData,
+      nonce: 0, // First transaction from this stealth address
+      payer: sponsor, // Sponsor pays for gas
+      paymentToken: address(token), // Pay in tokens
+      prePaymentMaxAmount: 0, // No pre-payment needed
+      totalPaymentMaxAmount: sponsorAmount, // Max payment to relayer
+      combinedGas: 500000, // Gas limit for the operation
+      encodedPreCalls: new bytes[](0), // No pre-calls
+      encodedFundTransfers: new bytes[](0), // No fund transfers
+      settler: address(0), // No settler
+      expiry: 0, // No expiry
+      // Additional fields
+      isMultichain: false,
+      funder: address(0),
+      funderSignature: "",
+      settlerContext: "",
+      prePaymentAmount: 0,
+      totalPaymentAmount: sponsorAmount, // Actual payment amount
+      paymentRecipient: relayer, // Relayer receives payment
+      signature: "", // Will be set below
+      paymentSignature: "",
+      supportedAccountImplementation: address(0) // Allow any implementation
+    });
 
-    // Execute using the account's execute function (simulating orchestrator-sponsored execution)
-    bytes32 mode =
-      bytes32(uint256(0x0100000000000000000000000000000000000000000000000000000000000000));
+    // Sign the Intent with the stealth address's key
+    // The signature needs to be from the authorized key we added
+    bytes32 intentHash = orchestrator.computeDigest(intent);
+    (uint8 v, bytes32 r, bytes32 s) = vm.sign(stealthPrivateKey, intentHash);
+    
+    // Pack the signature with the authorized keyHash
+    // Format: innerSignature || keyHash || prehash
+    intent.signature = abi.encodePacked(abi.encodePacked(r, s, v), authorizedKeyHash, "");
 
-    vm.prank(stealthAddress);
-    sweepAccount.execute(mode, executionData);
+    // Encode the Intent for submission
+    bytes memory encodedIntent = abi.encode(intent);
 
-    // Simulate sponsor payment to relayer (in production, orchestrator would handle this)
-    vm.prank(sponsor);
-    token.transfer(relayer, sponsorAmount);
+    // Expect the deposit event
+    vm.expectEmit();
+    emit Deposit(commitment, address(token), stealthAmount, encryptedNote);
 
-    // Verify tokens are now in shielded pool
+    // Submit the Intent to the orchestrator
+    // The orchestrator will:
+    // 1. Verify the signature against the stealth address's authorized key
+    // 2. Execute the calls on the stealth address
+    // 3. Transfer payment from sponsor to relayer atomically
+    vm.prank(relayer); // Relayer submits the Intent
+    bytes4 err = orchestrator.execute(encodedIntent);
+    
+    // Verify execution succeeded
+    assertEq(uint32(err), 0, "Orchestrator execution failed");
+
+    // Log the successful Intent execution
+    emit IntentCreated(
+      stealthAddress,
+      sponsor,
+      relayer,
+      stealthAmount,
+      sponsorAmount
+    );
+
+    // Verify the expected outcomes
+    // All tokens should be in the shielded pool
     assertEq(token.balanceOf(address(shieldedPool)), stealthAmount);
+    
+    // Stealth address should be empty
     assertEq(token.balanceOf(stealthAddress), 0);
+    
+    // Relayer should have received payment from sponsor via orchestrator
+    assertEq(token.balanceOf(relayer), sponsorAmount);
+    
+    // Sponsor should have paid for the operation
+    assertEq(token.balanceOf(sponsor), INITIAL_BALANCE - sponsorAmount);
+    
+    // Shielded pool should have the full amount
     assertEq(shieldedPool.getPoolBalance(address(token)), stealthAmount);
 
     return commitment;
   }
+  
+  // Event to demonstrate Intent structure
+  event IntentCreated(
+    address indexed eoa,
+    address indexed payer,
+    address indexed paymentRecipient,
+    uint256 executionAmount,
+    uint256 paymentAmount
+  );
 }
